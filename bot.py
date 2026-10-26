@@ -58,8 +58,6 @@ init_db()
 class Form(StatesGroup):
     waiting_for_shopping_item = State()
     waiting_for_task_title = State()
-    waiting_for_task_assign = State()
-    waiting_for_task_deadline = State()
 
 def get_main_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -151,6 +149,7 @@ async def handle_access_request(callback: CallbackQuery):
     
     await callback.answer()
 
+# --- СПИСОК ПОКУПОК ---
 @router.callback_query(F.data == "menu_shopping")
 async def show_shopping(callback: CallbackQuery):
     if get_user_status(callback.from_user.id) != 'approved':
@@ -176,6 +175,17 @@ async def show_shopping(callback: CallbackQuery):
 
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard), parse_mode="Markdown")
 
+@router.callback_query(F.data.startswith("buy_"))
+async def buy_item(callback: CallbackQuery):
+    row_id = int(callback.data.split("_")[1])
+    conn = sqlite3.connect("couple_bot.db")
+    cursor = conn.cursor()
+    cursor.execute("UPDATE shopping SET status='completed' WHERE id=?", (row_id,))
+    conn.commit()
+    conn.close()
+    await callback.answer("Товар куплен и удален из списка! 🎉")
+    await show_shopping(callback)
+
 @router.callback_query(F.data == "add_shopping")
 async def ask_shopping_item(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer("Введите название товара, который нужно купить:")
@@ -196,9 +206,85 @@ async def process_shopping_item(message: Message, state: FSMContext):
     conn.close()
 
     await state.clear()
-    await message.answer(f"✅ Товар «{item_name}» успешно добавлен в список покупок!")
+    await message.answer(f"✅ Товар «{item_name}» успешно добавлен! Нажмите /start, чтобы вернуться в меню.")
 
-# Веб-сервер для бесплатного тарифа Render (чтобы сервис не выключался по тайм-ауту)
+# --- ДОМАШНИЕ ЗАДАЧИ ---
+@router.callback_query(F.data == "menu_tasks")
+async def show_tasks(callback: CallbackQuery):
+    if get_user_status(callback.from_user.id) != 'approved':
+        await callback.answer("Нет доступа!", show_alert=True)
+        return
+    conn = sqlite3.connect("couple_bot.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, title FROM tasks WHERE status='pending'")
+    tasks = cursor.fetchall()
+    conn.close()
+
+    text = "📋 **Домашние задачи:**\n\n"
+    keyboard = []
+    if tasks:
+        for row_id, title in tasks:
+            text += f"• {title}\n"
+            keyboard.append([InlineKeyboardButton(text=f"✅ Выполнено: {title}", callback_data=f"done_task_{row_id}")])
+    else:
+        text += "Все задачи выполнены! 🎉\n"
+
+    keyboard.append([InlineKeyboardButton(text="➕ Добавить задачу", callback_data="add_task")])
+    keyboard.append([InlineKeyboardButton(text="🔙 Главное меню", callback_data="main_menu")])
+
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard), parse_mode="Markdown")
+
+@router.callback_query(F.data.startswith("done_task_"))
+async def finish_task(callback: CallbackQuery):
+    row_id = int(callback.data.split("_")[2])
+    conn = sqlite3.connect("couple_bot.db")
+    cursor = conn.cursor()
+    cursor.execute("UPDATE tasks SET status='completed' WHERE id=?", (row_id,))
+    conn.commit()
+    conn.close()
+    await callback.answer("Задача выполнена! 👍")
+    await show_tasks(callback)
+
+@router.callback_query(F.data == "add_task")
+async def ask_task_title(callback: CallbackQuery, state: FSMContext):
+    await callback.message.answer("Введите название новой задачи:")
+    await state.set_state(Form.waiting_for_task_title)
+    await callback.answer()
+
+@router.message(Form.waiting_for_task_title)
+async def process_task_title(message: Message, state: FSMContext):
+    if get_user_status(message.from_user.id) != 'approved':
+        return
+    task_title = message.text
+
+    conn = sqlite3.connect("couple_bot.db")
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO tasks (title) VALUES (?)", (task_title,))
+    conn.commit()
+    conn.close()
+
+    await state.clear()
+    await message.answer(f"✅ Задача «{task_title}» успешно добавлена! Нажмите /start, чтобы вернуться в меню.")
+
+# --- НАВИГАЦИЯ И ЗАГЛУШКИ ---
+@router.callback_query(F.data == "main_menu")
+async def return_to_main_menu(callback: CallbackQuery):
+    await callback.message.edit_text(
+        "👋 Главное меню. Выберите нужный раздел:",
+        reply_markup=get_main_menu()
+    )
+    await callback.answer()
+
+@router.callback_query(F.data.in_({"menu_water", "menu_summary"}))
+async def stub_sections(callback: CallbackQuery):
+    keyboard = [[InlineKeyboardButton(text="🔙 Главное меню", callback_data="main_menu")]]
+    await callback.message.edit_text(
+        "🚧 Этот раздел находится в разработке и скоро появится!",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+    )
+    await callback.answer()
+
+# Веб-сервер для бесплатного тарифа Render
 async def handle(request):
     return web.Response(text="Bot is running!")
 
@@ -215,7 +301,6 @@ async def main():
     dp.include_router(router)
     await bot.delete_webhook(drop_pending_updates=True)
     
-    # Запускаем и веб-сервер, и самого телеграм-бота одновременно
     await web_server()
     await dp.start_polling(bot)
 
