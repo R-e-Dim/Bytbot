@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import sqlite3
+from datetime import datetime
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command
@@ -208,6 +209,87 @@ async def process_shopping_item(message: Message, state: FSMContext):
     await state.clear()
     await message.answer(f"✅ Товар «{item_name}» успешно добавлен! Нажмите /start, чтобы вернуться в меню.")
 
+# --- ТРЕКЕР ВОДЫ ---
+@router.callback_query(F.data == "menu_water")
+async def show_water(callback: CallbackQuery):
+    if get_user_status(callback.from_user.id) != 'approved':
+        await callback.answer("Нет доступа!", show_alert=True)
+        return
+    
+    user_name = callback.from_user.first_name
+    today = datetime.now().strftime("%Y-%m-%d")
+    
+    conn = sqlite3.connect("couple_bot.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT amount, date FROM water WHERE user_name=?", (user_name,))
+    row = cursor.fetchone()
+    
+    if row:
+        amount, db_date = row
+        if db_date != today:
+            amount = 0
+            cursor.execute("UPDATE water SET amount=0, date=? WHERE user_name=?", (today, user_name))
+            conn.commit()
+    else:
+        amount = 0
+        cursor.execute("INSERT INTO water (user_name, amount, date) VALUES (?, 0, ?)", (user_name, today))
+        conn.commit()
+        
+    conn.close()
+    
+    text = f"💧 **Трекер воды на сегодня:**\n\nВы выпили: **{amount * 250} мл** ({amount} стак.) 🥤\n\n*Рекомендуемая норма: ~2 литра (8 стаканов)*"
+    
+    keyboard = [
+        [InlineKeyboardButton(text="➕ Выпить стакан (250 мл)", callback_data="add_water")],
+        [InlineKeyboardButton(text="🔄 Сбросить счетчик", callback_data="reset_water")],
+        [InlineKeyboardButton(text="🔙 Главное меню", callback_data="main_menu")]
+    ]
+    
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard), parse_mode="Markdown")
+    await callback.answer()
+
+@router.callback_query(F.data == "add_water")
+async def add_water(callback: CallbackQuery):
+    user_name = callback.from_user.first_name
+    today = datetime.now().strftime("%Y-%m-%d")
+    
+    conn = sqlite3.connect("couple_bot.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT amount, date FROM water WHERE user_name=?", (user_name,))
+    row = cursor.fetchone()
+    
+    if row:
+        amount, db_date = row
+        if db_date != today:
+            amount = 1
+            cursor.execute("UPDATE water SET amount=1, date=? WHERE user_name=?", (today, user_name))
+        else:
+            amount += 1
+            cursor.execute("UPDATE water SET amount=? WHERE user_name=?", (amount, user_name))
+    else:
+        amount = 1
+        cursor.execute("INSERT INTO water (user_name, amount, date) VALUES (?, 1, ?)", (user_name, today))
+        
+    conn.commit()
+    conn.close()
+    
+    await callback.answer("+1 стакан воды! 💧")
+    await show_water(callback)
+
+@router.callback_query(F.data == "reset_water")
+async def reset_water(callback: CallbackQuery):
+    user_name = callback.from_user.first_name
+    today = datetime.now().strftime("%Y-%m-%d")
+    
+    conn = sqlite3.connect("couple_bot.db")
+    cursor = conn.cursor()
+    cursor.execute("UPDATE water SET amount=0, date=? WHERE user_name=?", (today, user_name))
+    conn.commit()
+    conn.close()
+    
+    await callback.answer("Счетчик воды сброшен!")
+    await show_water(callback)
+
 # --- ДОМАШНИЕ ЗАДАЧИ ---
 @router.callback_query(F.data == "menu_tasks")
 async def show_tasks(callback: CallbackQuery):
@@ -275,8 +357,8 @@ async def return_to_main_menu(callback: CallbackQuery):
     )
     await callback.answer()
 
-@router.callback_query(F.data.in_({"menu_water", "menu_summary"}))
-async def stub_sections(callback: CallbackQuery):
+@router.callback_query(F.data == "menu_summary")
+async def stub_summary(callback: CallbackQuery):
     keyboard = [[InlineKeyboardButton(text="🔙 Главное меню", callback_data="main_menu")]]
     await callback.message.edit_text(
         "🚧 Этот раздел находится в разработке и скоро появится!",
