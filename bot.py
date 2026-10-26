@@ -1,7 +1,7 @@
 import asyncio
 import logging
+import os
 import sqlite3
-from datetime import datetime
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command
@@ -208,17 +208,102 @@ async def process_shopping_item(message: Message, state: FSMContext):
     await state.clear()
     await message.answer(f"✅ Товар «{item_name}» успешно добавлен! Нажмите /start, чтобы вернуться в меню.")
 
-# --- ТРЕКЕР ВОДЫ ---
-@router.callback_query(F.data == "menu_water")
-async def show_water(callback: CallbackQuery):
+# --- ДОМАШНИЕ ЗАДАЧИ ---
+@router.callback_query(F.data == "menu_tasks")
+async def show_tasks(callback: CallbackQuery):
     if get_user_status(callback.from_user.id) != 'approved':
         await callback.answer("Нет доступа!", show_alert=True)
         return
-    
     conn = sqlite3.connect("couple_bot.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT user_name, amount FROM water")
-    rows = cursor.fetchall()
+    cursor.execute("SELECT id, title FROM tasks WHERE status='pending'")
+    tasks = cursor.fetchall()
     conn.close()
 
-    text
+    text = "📋 **Домашние задачи:**\n\n"
+    keyboard = []
+    if tasks:
+        for row_id, title in tasks:
+            text += f"• {title}\n"
+            keyboard.append([InlineKeyboardButton(text=f"✅ Выполнено: {title}", callback_data=f"done_task_{row_id}")])
+    else:
+        text += "Все задачи выполнены! 🎉\n"
+
+    keyboard.append([InlineKeyboardButton(text="➕ Добавить задачу", callback_data="add_task")])
+    keyboard.append([InlineKeyboardButton(text="🔙 Главное меню", callback_data="main_menu")])
+
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard), parse_mode="Markdown")
+
+@router.callback_query(F.data.startswith("done_task_"))
+async def finish_task(callback: CallbackQuery):
+    row_id = int(callback.data.split("_")[2])
+    conn = sqlite3.connect("couple_bot.db")
+    cursor = conn.cursor()
+    cursor.execute("UPDATE tasks SET status='completed' WHERE id=?", (row_id,))
+    conn.commit()
+    conn.close()
+    await callback.answer("Задача выполнена! 👍")
+    await show_tasks(callback)
+
+@router.callback_query(F.data == "add_task")
+async def ask_task_title(callback: CallbackQuery, state: FSMContext):
+    await callback.message.answer("Введите название новой задачи:")
+    await state.set_state(Form.waiting_for_task_title)
+    await callback.answer()
+
+@router.message(Form.waiting_for_task_title)
+async def process_task_title(message: Message, state: FSMContext):
+    if get_user_status(message.from_user.id) != 'approved':
+        return
+    task_title = message.text
+
+    conn = sqlite3.connect("couple_bot.db")
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO tasks (title) VALUES (?)", (task_title,))
+    conn.commit()
+    conn.close()
+
+    await state.clear()
+    await message.answer(f"✅ Задача «{task_title}» успешно добавлена! Нажмите /start, чтобы вернуться в меню.")
+
+# --- НАВИГАЦИЯ И ЗАГЛУШКИ ---
+@router.callback_query(F.data == "main_menu")
+async def return_to_main_menu(callback: CallbackQuery):
+    await callback.message.edit_text(
+        "👋 Главное меню. Выберите нужный раздел:",
+        reply_markup=get_main_menu()
+    )
+    await callback.answer()
+
+@router.callback_query(F.data.in_({"menu_water", "menu_summary"}))
+async def stub_sections(callback: CallbackQuery):
+    keyboard = [[InlineKeyboardButton(text="🔙 Главное меню", callback_data="main_menu")]]
+    await callback.message.edit_text(
+        "🚧 Этот раздел находится в разработке и скоро появится!",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+    )
+    await callback.answer()
+
+# Веб-сервер с автоматическим определением порта для Render
+async def handle(request):
+    return web.Response(text="Bot is running!")
+
+async def web_server():
+    app = web.Application()
+    app.router.add_get("/", handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 10000))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+
+async def main():
+    dp = Dispatcher()
+    dp.include_router(router)
+    await bot.delete_webhook(drop_pending_updates=True)
+    
+    await web_server()
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
