@@ -348,21 +348,57 @@ async def process_task_title(message: Message, state: FSMContext):
     await state.clear()
     await message.answer(f"✅ Задача «{task_title}» успешно добавлена! Нажмите /start, чтобы вернуться в меню.")
 
-# --- НАВИГАЦИЯ И ЗАГЛУШКИ ---
+# --- СВОДКА ЗА ДЕНЬ ---
+@router.callback_query(F.data == "menu_summary")
+async def show_summary(callback: CallbackQuery):
+    if get_user_status(callback.from_user.id) != 'approved':
+        await callback.answer("Нет доступа!", show_alert=True)
+        return
+    
+    conn = sqlite3.connect("couple_bot.db")
+    cursor = conn.cursor()
+    
+    # Считаем активные покупки
+    cursor.execute("SELECT COUNT(*) FROM shopping WHERE status='active'")
+    shopping_count = cursor.fetchone()[0]
+    
+    # Считаем невыполненные задачи
+    cursor.execute("SELECT COUNT(*) FROM tasks WHERE status='pending'")
+    tasks_count = cursor.fetchone()[0]
+    
+    # Получаем всю воду участников за сегодня
+    today = datetime.now().strftime("%Y-%m-%d")
+    cursor.execute("SELECT user_name, amount, date FROM water")
+    water_rows = cursor.fetchall()
+    
+    conn.close()
+    
+    water_text = ""
+    for user_name, amount, db_date in water_rows:
+        cur_amount = amount if db_date == today else 0
+        water_text += f"• {user_name}: {cur_amount * 250} мл ({cur_amount} стак.)\n"
+    
+    if not water_text:
+        water_text = "• Никто еще не пил воду сегодня\n"
+
+    text = (
+        f"📊 **Сводка за день ({datetime.now().strftime('%d.%m.%Y')}):**\n\n"
+        f"🛒 Активных товаров в покупках: **{shopping_count}**\n"
+        f"📋 Невыполненных задач: **{tasks_count}**\n\n"
+        f"💧 **Выпито воды:**\n{water_text}"
+    )
+    
+    keyboard = [[InlineKeyboardButton(text="🔙 Главное меню", callback_data="main_menu")]]
+    
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard), parse_mode="Markdown")
+    await callback.answer()
+
+# --- НАВИГАЦИЯ ---
 @router.callback_query(F.data == "main_menu")
 async def return_to_main_menu(callback: CallbackQuery):
     await callback.message.edit_text(
         "👋 Главное меню. Выберите нужный раздел:",
         reply_markup=get_main_menu()
-    )
-    await callback.answer()
-
-@router.callback_query(F.data == "menu_summary")
-async def stub_summary(callback: CallbackQuery):
-    keyboard = [[InlineKeyboardButton(text="🔙 Главное меню", callback_data="main_menu")]]
-    await callback.message.edit_text(
-        "🚧 Этот раздел находится в разработке и скоро появится!",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
     )
     await callback.answer()
 
